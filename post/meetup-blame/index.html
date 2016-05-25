@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en-US">
+<head>
+    <meta http-equiv="Content-Type" content="text/html" charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1">
+
+    <title>Levenshtein distance, LCS, diff and blame &middot; source{d} blog</title>
+    <meta name="author" content="source{d}">
+    <meta name="description" content="coding to find awesome engineers">
+    <meta name="generator" content="Hugo 0.15" />
+    <meta name="HandheldFriendly" content="True">
+    <meta name="MobileOptimized" content="320">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+
+    <link rel="shortcut icon" href="/img/favicon.ico">
+    <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/normalize/2.1.2/normalize.min.css">
+
+    <!-- Stylesheets -->
+    <link rel="stylesheet" href="/css/screen.css">
+    <link rel="stylesheet" href="/css/github.css">
+    <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/highlight.js/8.3/styles/default.min.css">
+
+    <!-- Stylesheet for theme color -->
+    <style type="text/css">
+    a, a:visited {color: #32526A; font-weight: 600; }
+    .pagination a {color: #111111;}
+    .gist .gist-file .gist-meta a:visited {color: #111111 !important;}
+    a:focus, a:hover {color: #32526A;}
+    h1.post-title, h1.blog-title a, h1.blog-title a {
+      color: #32526A;
+    }
+
+    h1.post-title a:focus, h1.post-title a:hover, h1.blog-title a:focus, h1.blog-title a:hover {
+      color: #000;
+    }
+    .older-posts:hover, .newer-posts:hover {color: #32526A;}
+
+    .post-meta .authorimage {
+      zoom:.5;
+    }
+
+    .post-meta {
+      text-transform: none;
+    }
+
+    .post .post-meta {
+      margin-bottom: 50px;
+    }
+
+    .preview .post-meta p { margin:0; }
+    .preview .post-meta .authorimage {
+      display:none;
+    }
+
+    .preview .image  {
+      height: 90px;
+      margin: auto;
+      overflow: hidden;
+      background-size: cover;
+      background-position: center center;
+    }
+
+    .preview .image img {
+      display: block;
+      margin: 0 auto;
+      max-width: 100%;
+    }
+</style>
+
+</head>
+<body class="post-template">
+
+    <div id="nav">
+  <ul class="nav-list">
+    <li class="nav-list-item"><a href="http://sourced.tech">sourced.tech</a></li>
+  </ul>
+</div>
+
+
+<header id="site-head">
+	
+	<h1 class="blog-title"><a href="/">source{d}</a></h1>
+	
+	
+	<h1 class="blog-subtitle">coding to find awesome engineers</h1>
+	
+  <span class="blog-sub-link">Take me to <a href="http://sourced.tech">sourced.tech</a></span>
+</header>
+    
+
+    <main class="content" role="main">
+	    <article class="post">
+	        <header>
+	        <h1 class="post-title">Levenshtein distance, LCS, diff and blame</h1>
+	        <div class="post-meta">
+            
+
+    <div class="authorimage" style="background: url(https://avatars3.githubusercontent.com/u/9169414?v=3&amp;s=460)"></div>
+    <p>
+      by <b>Alberto Cortés</b>
+      <time datetime="15 February 2016">15 February 2016</time></div>
+    </p>
+
+
+	        </header>
+	        <section class="post-content">
+	            
+
+<p>There are some interesting <a href="http://www.meetup.com">meetups</a> going on in Madrid,
+and as part of the engineering team at <strong>source{d}</strong>, we often attend and
+organize some of them; it is a nice way to blow off some steam after work,
+learn some cool new things and meet quite interesting people.</p>
+
+<p>A few weeks ago, at a <a href="http://www.meetup.com/Papers-We-Love-Madrid/">Papers we love
+Madrid</a> meetup, I had the chance
+to give a talk about how <code>git blame</code> works.*</p>
+
+<p>Blaming a file in git is an operation that identifies who modified each of the
+lines in a file, along with the modification date and other details.  This
+comes in handy when you want to know which member of your team wrote a particular piece of
+code or who is to blame for a bug }:-).</p>
+
+<p>For example, let&rsquo;s blame <code>src/bufio/bufio.go</code> from the standard Go Distribution:</p>
+
+<pre><code class="language-text">$ git blame src/bufio/bufio.go
+[...]
+64776da4 src/pkg/bufio/bufio.go (Rob Pike          2011-12-13 15:07:17 -0800  40) const minReadBufferSize = 16
+4ffc7992 src/pkg/bufio/bufio.go (Rui Ueyama        2014-03-24 11:48:34 -0700  41) const maxConsecutiveEmptyReads = 100
+[...]
+</code></pre>
+
+<p>According to this <code>git blame</code> output, it seems that the declaration of the
+constant <code>minReadBufferSize</code> was last modified (or created) by Rob Pike in 2011
+while the last version of <code>maxConsecutiveEmptyReads</code> is attributed to Rui Ueyama in
+2014.</p>
+
+<p>The current <code>git blame</code> implementation is a highly optimized and quite
+powerful piece of code, but its core functionality is easy to understand
+once you grasp a few concepts:</p>
+
+<ol>
+<li>Levenshtein Distance</li>
+<li>Longest Common Subsequence Problem</li>
+<li>Diff</li>
+<li>Tracking Lines Across File Revisions</li>
+</ol>
+
+<p>The goal of the talk was to understand these concepts and some of their more
+naive implementations.  This blog post is not going to be a full transcription
+of my talk, but allow me to tease you with a brief introduction to these
+interesting topics:</p>
+
+<h2 id="1-levenshtein-distance:96a8f5e83b4c340209192177cad4778a">1. Levenshtein Distance</h2>
+
+<p>The Levenshtein distance is a popular measure of how (dis)similar two strings
+are.  More precisely, it is the minimum number of <em>edits</em> you have to perform on
+one of them to turn it into the other, where by edits I mean: adding, removing
+or changing a single character.</p>
+
+<p>As expected, the Levenshtein distance of two identical strings is 0:</p>
+
+<pre><code class="language-Go">a := &quot;pain&quot;
+Levenshtein(a, a) // is 0
+</code></pre>
+
+<p>For strings that differ only in one <em>edit</em>, the Levenshtein distance should be
+1:</p>
+
+<pre><code class="language-Go">a := &quot;pain&quot;
+b := &quot;plain&quot;
+Levenshtein(a, b)  // is 1, just insert 'l' at a[1]
+
+c := &quot;pan&quot;
+Levenshtein(a, c)  // is 1, just remove 'i' from a[2]
+
+d := &quot;pawn&quot;
+Levenshtein(a, d)  // is 1, just change 'i' to 'w'
+</code></pre>
+
+<p>When the strings differ in more than one <em>edit</em>, calculating the
+Levenshtein distance is no longer trivial since there are many different
+combinations of edits that will allow you to turn one string into another,
+and only some of them will have the minimum number of edits:</p>
+
+<pre><code class="language-Go">e := &quot;Lost&quot;
+f := &quot;plot&quot;
+Levenshtein(e, f)  // is 3, here is one possible
+                   //       combination of edits:
+                   //   - change 'L' at e[0] to 'p'
+                   //   - insert 'l' at e[1]
+                   //   - remove 's' from e[3]
+</code></pre>
+
+<p>Calculating the Levenshtein distance of two strings is a fun and interesting
+<a href="https://www.youtube.com/watch?v=wXQLil_SGCI">programming workout</a>. In the case
+that you get stuck on it, you will find a recursive solution, as well as a dynamic
+programming one, in the <a href="https://drive.google.com/file/d/0B05KyBUlYY2TV2N6X2x6ZWhBXzQ/view?usp=sharing">slides from my
+talk</a>.</p>
+
+<h2 id="2-longest-common-subsequence-problem:96a8f5e83b4c340209192177cad4778a">2. Longest Common Subsequence Problem</h2>
+
+<p>The Longest Common Subsequence Problem (LCS for shorts), is a classic computer
+science problem, consisting in finding the longest subsequence common to all
+sequences in a given set.</p>
+
+<p>For example, the LCS of the strings <code>&quot;pain&quot;</code> and <code>&quot;plans&quot;</code> is <code>&quot;pan&quot;</code>, as it
+has all the characters common to both strings, without messing up the character
+ordering.</p>
+
+<p>Solving this problem for longer strings is not trivial, though:</p>
+
+<pre><code class="language-Go">a := &quot;AAACCGTGAGTTATTCGTTCTAGAA&quot;
+b := &quot;CACCCCTAAGGTACCTTTGGTTC&quot;
+LCS(a, b) // is &quot;ACCTGGTTTTGTTC&quot; or &quot;ACCTAGTATTGTTC&quot; ...
+</code></pre>
+
+<p>Knowing the LCS of two strings is equivalent to knowing the actual set of
+edits you need to perform to turn one into the other. You will find an
+intuitive explanation of this important equivalence in the <a href="https://drive.google.com/file/d/0B05KyBUlYY2TV2N6X2x6ZWhBXzQ/view?usp=sharing">slides from the
+talk</a>.</p>
+
+<h2 id="3-diff:96a8f5e83b4c340209192177cad4778a">3. Diff</h2>
+
+<p>The Diff Algorithm is the basis of <code>git blame</code> and a venerable piece of
+code that has been laying around since 1970.</p>
+
+<p>Given two files, the <code>diff</code> command will return the <em>line edits</em> you have to
+perform to one of them, to turn it into the other. For example: given the files
+<code>a.txt</code> and <code>b.txt</code>&hellip;</p>
+
+<pre><code class="language-text">$ cat a.txt
+aaa
+aaaaa
+aa
+
+$ cat b.txt
+bb
+bbb
+aaa
+AAAAA
+</code></pre>
+
+<p>The <code>diff</code> of both files would be:</p>
+
+<pre><code class="language-text">$ diff a.txt b.txt
+0a1,2
+&gt; bb
+&gt; bbb
+2,3c4
+&lt; aaaaa
+&lt; aa
+---
+&gt; AAAAA
+</code></pre>
+
+<p>As you probably already know, this means:</p>
+
+<ul>
+<li><p><code>0a1,2</code>: add at line 0 (at the beginning) of file <code>a.txt</code>, the lines 1 and 2 from file <code>b.txt</code>.</p></li>
+
+<li><p><code>2,3c4</code>: substitute lines 2 and 3 of file <code>a.txt</code> with line number 4 of file <code>b.txt</code>.</p></li>
+</ul>
+
+<p>The current version of <code>diff</code> is highly optimized, but, at its core, it
+can be easily understood as some hashing (turning lines into <em>equivalent
+characters</em>), and an LCS solver.  You will find more details about this in the
+<a href="https://drive.google.com/file/d/0B05KyBUlYY2TV2N6X2x6ZWhBXzQ/view?usp=sharing">slides from the talk</a>.</p>
+
+<h2 id="4-tracking-lines-across-file-revisions:96a8f5e83b4c340209192177cad4778a">4. Tracking Lines Across File Revisions</h2>
+
+<p>At the core of the <code>git blame</code> algorithm is the problem of tracking lines
+across file revisions; knowing at which revision each particular line
+was added or modified.</p>
+
+<p>This problem is usually solved by creating a graph where:</p>
+
+<ul>
+<li><p>vertexes represent each line of a file, for all revisions of the file</p></li>
+
+<li><p>edges represent the same line across diferent revisions of the file</p></li>
+</ul>
+
+<p>In the <a href="https://drive.google.com/file/d/0B05KyBUlYY2TV2N6X2x6ZWhBXzQ/view?usp=sharing">slides from the talk</a> you can find examples of
+forward and backward versions of a graph traversal algorithm to solve the
+blaming problem, from the 2006 paper <a href="https://users.soe.ucsc.edu/~ejw/papers/MSR26s-zimmermann.pdf">Mining Version Archives for Co-changed
+Lines</a>
+(Zimmermann et al.).</p>
+
+<p>*We would like to thank <a href="https://www.shuttlecloud.com/">ShuttleCloud</a> for
+hosting and organizing the event (and for the beers!).</p>
+
+	        </section>
+
+          <footer class="post-footer">
+              
+
+<section class="author">
+    <div class="authorimage" style="background: url(https://avatars3.githubusercontent.com/u/9169414?v=3&amp;s=460)"></div>
+    <h4>
+      Alberto Cortés
+      
+      <a href="//github.com/alcortesm" target="_blank" title="GitHub">
+        <i class="fa fa-2x fa-fw fa-github"></i>
+        <span class="hidden">GitHub</span>
+      </a>
+      
+      
+    </h4>
+
+    <p class="meta">
+    </p>
+
+    <p class="bio">Learning Go (both of them).</p>
+
+</section>
+
+
+          </footer>
+
+          <section class="mailchimp">  
+            
+            <link href="//cdn-images.mailchimp.com/embedcode/horizontal-slim-10_7.css" rel="stylesheet" type="text/css">
+            <style type="text/css">
+              #mc_embed_signup{background:#fff; clear:left; font:14px Helvetica,Arial,sans-serif; width:100%;}
+               
+            </style>
+            <div id="mc_embed_signup">
+            <form action="//tech.us13.list-manage.com/subscribe/post?u=0eae08951c21c9bca382c2c2e&amp;id=9814bef9fd" method="post" id="mc-embedded-subscribe-form" name="mc-embedded-subscribe-form" class="validate" target="_blank" novalidate>
+                <div id="mc_embed_signup_scroll">
+              <label for="mce-EMAIL">Receive new posts via email</label>
+              <input type="email" value="" name="EMAIL" class="email" id="mce-EMAIL" placeholder="email address" required>
+                
+                <div style="position: absolute; left: -5000px;" aria-hidden="true"><input type="text" name="b_0eae08951c21c9bca382c2c2e_9814bef9fd" tabindex="-1" value=""></div>
+                <div class="clear"><input type="submit" value="Subscribe" name="subscribe" id="mc-embedded-subscribe" class="button"></div>
+                </div>
+            </form>
+            </div>
+            
+          </section>
+
+			
+	        	
+	        
+
+			
+
+
+	        <section class="share">
+	            <p class="backtotop"><a data-scroll href="#site-head"><i class="fa fa-lg fa-fw fa-angle-double-up"></i></a><a data-scroll class="backtotoptext" href="#site-head"> Back to top</a></p>
+	            <p class="info prompt">Share</p>
+	            <a href="http://twitter.com/share?text=Levenshtein%20distance%2c%20LCS%2c%20diff%20and%20blame&url=%2fpost%2fmeetup-blame%2f" title="Share on Twitter"
+	                onclick="window.open(this.href, 'twitter-share', 'width=550,height=235');return false;">
+	                <i class="fa fa-2x fa-fw fa-twitter-square"></i> <span class="hidden">Twitter</span>
+	            </a>
+	            <a href="https://www.facebook.com/sharer/sharer.php?u=%2fpost%2fmeetup-blame%2f" title="Share on Facebook"
+	                onclick="window.open(this.href, 'facebook-share','width=580,height=296');return false;">
+	                <i class="fa fa-2x fa-fw fa-facebook-square" style="margin-left: -8px"></i> <span class="hidden">Facebook</span>
+	            </a>
+	            <a href="https://plus.google.com/share?url=%2fpost%2fmeetup-blame%2f" title="Share on Google+"
+	               onclick="window.open(this.href, 'google-plus-share', 'width=490,height=530');return false;">
+	                <i class="fa fa-2x fa-fw fa-google-plus-square" style="margin-left: -8px"></i> <span class="hidden">Google+</span>
+	            </a>
+	        </section>
+
+
+	    </article>
+	</main>
+
+    <footer class="site-footer">
+	<div class="inner">
+		<section class="footer-social">
+			
+		    <a href="//twitter.com/srcd_" target="_blank" title="Twitter"><i class="fa fa-2x fa-fw fa-twitter"></i> <span class="hidden">Twitter</span></a>&nbsp;
+		    
+		    
+		    <a href="//github.com/src-d" target="_blank" title="GitHub"><i class="fa fa-2x fa-fw fa-github"></i> <span class="hidden">GitHub</span></a>&nbsp;
+		    
+		    
+		</section>
+
+		<section class="copyright">&copy; 2016 <a href="/">source{d}</a>. Crafted with love.</section>
+	</div>
+</footer>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/jquery/2.1.4/jquery.min.js"></script>
+<script src="/js/index.js"></script>
+<script src="/js/smooth-scroll.min.js"></script>
+<script src="//cdnjs.cloudflare.com/ajax/libs/highlight.js/8.3/highlight.min.js"></script>
+
+<script>
+    smoothScroll.init({
+        speed: 800,
+        easing: 'easeInOutCubic',
+        updateURL: false,
+        offset: 125,
+    });
+</script>
+<script>hljs.initHighlightingOnLoad();</script>
+
+
+<!-- Google Analytics -->
+<script>
+  var _gaq=[['_setAccount','UA-69608223-2'],['_trackPageview']];
+  (function(d,t){var g=d.createElement(t),s=d.getElementsByTagName(t)[0];
+  g.src=('https:'==location.protocol?'//ssl':'//www')+'.google-analytics.com/ga.js';
+  s.parentNode.insertBefore(g,s)}(document,'script'));
+</script>
+
+
+<script type="text/javascript">
+    adroll_adv_id = "IYZYMSZIZZGURCHNYRRKTA";
+    adroll_pix_id = "MXWTIGH3ZNCXDAD4UGQIW5";
+     
+     
+    (function () {
+        var _onload = function(){
+            if (document.readyState && !/loaded|complete/.test(document.readyState)){setTimeout(_onload, 10);return}
+            if (!window.__adroll_loaded){__adroll_loaded=true;setTimeout(_onload, 50);return}
+            var scr = document.createElement("script");
+            var host = (("https:" == document.location.protocol) ? "https://s.adroll.com" : "http://a.adroll.com");
+            scr.setAttribute('async', 'true');
+            scr.type = "text/javascript";
+            scr.src = host + "/j/roundtrip.js";
+            ((document.getElementsByTagName('head') || [null])[0] ||
+                document.getElementsByTagName('script')[0].parentNode).appendChild(scr);
+        };
+        if (window.addEventListener) {window.addEventListener('load', _onload, false);}
+        else {window.attachEvent('onload', _onload)}
+    }());
+</script>
+
+
+</body>
+</html>
